@@ -45,6 +45,12 @@ func main() {
 	}
 	defer writer.Close()
 
+	ctx := context.Background()
+	if err := writer.Health(ctx); err != nil {
+		log.Fatalf("influx health check failed (URL=%s org=%s bucket=%s): %v", influxURL, influxOrg, influxBucket, err)
+	}
+	log.Printf("influx: connected OK (org=%s bucket=%s)", influxOrg, influxBucket)
+
 	onMessage := func(d model.MachineData) error {
 		return writer.Write(context.Background(), d)
 	}
