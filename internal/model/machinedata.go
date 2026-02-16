@@ -9,6 +9,9 @@ type MachineData struct {
 	Person    string    `json:"person"`
 	ManPower  int       `json:"manPower"`
 	JobId     string    `json:"jobId"`
+	Company   string    `json:"company"`
+	Working   bool      `json:"working"`
+	Status    bool      `json:"status"`
 	SubJob    string    `json:"subJob"`
 	Stroke    int       `json:"stroke"`
 	Volt      float64   `json:"volt"`

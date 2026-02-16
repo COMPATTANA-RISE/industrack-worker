@@ -50,7 +50,10 @@ func (w *Writer) Write(ctx context.Context, d model.MachineData) error {
 		AddTag("serial", d.Serial).
 		AddTag("person", d.Person).
 		AddTag("jobId", d.JobId).
+		AddTag("company", d.Company).
 		AddTag("subJob", d.SubJob).
+		AddField("working", d.Working).
+		AddField("status", d.Status).
 		AddField("manPower", d.ManPower).
 		AddField("stroke", d.Stroke).
 		AddField("volt", d.Volt).
