@@ -143,7 +143,9 @@ func parsePayload(raw []byte) (serial, person string, manPower int, jobId, subJo
 	serial = getStr("serial", "Serial", "SERIAL")
 	person = getStr("person", "PERSON", "Person")
 	manPower = getInt("manPower", "Man Power", "man_power", "MAN_POWER")
-	jobId = getStr("jobId", "JOB_ID", "JobId", "job_id")
+	rawJobId = getStr("jobId", "JOB_ID", "JobId", "job_id")
+	working = getBool("working", "Working", "WORKING")
+	status = getBool("status", "Status", "STATUS")
 	subJob = getStr("subJob", "SUB_JOB", "SubJob", "sub_job")
 	stroke = getInt("stroke", "Stroke", "STOKE", "stroke")
 	volt = getFloat("volt", "Volt", "VOLT")
@@ -171,6 +173,12 @@ func Subscribe(client mqtt.Client, onMessage func(model.MachineData) error) erro
 			log.Printf("mqtt: invalid json topic=%s err=%v", msg.Topic(), err)
 			return
 		}
+		// Parse jobId: "JOB-AAA-001#CP0001" -> JobId="JOB-AAA-001", Company="CP0001"
+		jobId, company := rawJobId, ""
+		if i := strings.Index(rawJobId, "#"); i >= 0 {
+			jobId = strings.TrimSpace(rawJobId[:i])
+			company = strings.TrimSpace(rawJobId[i+1:])
+		}
 		now := time.Now()
 		var timeParsed, timestampParsed time.Time
 		timeParsed = now
@@ -195,6 +203,9 @@ func Subscribe(client mqtt.Client, onMessage func(model.MachineData) error) erro
 			Person:    person,
 			ManPower:  manPower,
 			JobId:     jobId,
+			Company:   company,
+			Working:   working,
+			Status:    status,
 			SubJob:    subJob,
 			Stroke:    stroke,
 			Volt:      roundFloat(volt, 2),
