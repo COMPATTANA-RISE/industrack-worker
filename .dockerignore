@@ -1,0 +1,45 @@
+# Compiled binaries / build output
+worker
+idt-worker
+dist
+build
+bin
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+__debug_bin*
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.html
+go.work
+go.work.sum
+
+# Vendored deps (module download happens in the builder stage)
+vendor
+
+# Git / IDE
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets — provided at runtime
+.env
+.env.*
+!.env.example
+
+# Logs / docs
+*.log
+README.md
