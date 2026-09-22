@@ -1,225 +1,73 @@
 package mqtt
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"math"
-	"strconv"
-	"strings"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+
 	"idt-worker/internal/model"
+	"idt-worker/internal/quality"
+	"idt-worker/internal/validate"
 )
 
-// roundFloat rounds v to the given number of decimal places.
-func roundFloat(v float64, decimals int) float64 {
-	if decimals <= 0 {
-		return math.Round(v)
-	}
-	mult := math.Pow(10, float64(decimals))
-	return math.Round(v*mult) / mult
+// TopicRealtime is the 1 Hz sample stream from every S-Box.
+const TopicRealtime = "machine/+/realtime"
+
+// Stats are cumulative message counters, logged periodically by main.
+type Stats struct {
+	Received atomic.Int64
+	Written  atomic.Int64
+	Rejected atomic.Int64
+	Flagged  atomic.Int64
 }
 
-const (
-	TopicRealtime = "machine/+/realtime"
-	QoS           = 0
-)
-
-// flexTime accepts JSON "time" as either string (RFC3339) or number (Unix seconds).
-type flexTime string
-
-func (t *flexTime) UnmarshalJSON(b []byte) error {
-	var v interface{}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	switch x := v.(type) {
-	case string:
-		*t = flexTime(x)
-		return nil
-	case float64:
-		*t = flexTime(strconv.FormatInt(int64(x), 10))
-		return nil
-	default:
-		return fmt.Errorf("time: expected string or number, got %T", v)
-	}
+// Handler validates each realtime message, counts problems and hands valid samples to Write.
+type Handler struct {
+	Opts    validate.Options
+	Tracker *validate.Tracker
+	Quality *quality.Aggregator
+	Stats   *Stats
+	Write   func(model.MachineData)
+	Now     func() time.Time
 }
 
-// TopicToMachineId extracts machineId from topic "machine/{id}/realtime".
-func TopicToMachineId(topic string) (string, bool) {
-	parts := strings.Split(topic, "/")
-	if len(parts) != 3 || parts[0] != "machine" || parts[2] != "realtime" {
-		return "", false
+// Handle processes one message. It never blocks on InfluxDB: Write only queues the point.
+func (h *Handler) Handle(topic string, payload []byte) {
+	now := time.Now()
+	if h.Now != nil {
+		now = h.Now()
 	}
-	return parts[1], true
+	h.Stats.Received.Add(1)
+
+	res := validate.Realtime(topic, payload, now, h.Opts)
+	if res.Reject {
+		h.Stats.Rejected.Add(1)
+		h.Quality.Add(res.Data.MachineId, res.Issues, now)
+		return
+	}
+
+	issues := append(res.Issues, h.Tracker.Check(&res.Data)...)
+	if len(issues) > 0 {
+		h.Stats.Flagged.Add(1)
+		h.Quality.Add(res.Data.MachineId, issues, now)
+	}
+	h.Write(res.Data)
+	h.Stats.Written.Add(1)
 }
 
-// parsePayload unmarshals JSON and reads fields with flexible keys (person/PERSON, volt/Volt, etc.).
-// timeStr = from "time" key only, timestampStr = from "timestamp" key only (stored separately).
-func parsePayload(raw []byte) (serial, person string, manPower int, rawJobId, subJob string, working, status bool, stroke int, volt, amp, pf, wh float64, timeStr, timestampStr string, err error) {
-	var m map[string]interface{}
-	if err = json.Unmarshal(raw, &m); err != nil {
-		return "", "", 0, "", "", false, false, 0, 0, 0, 0, 0, "", "", err
-	}
-	getStr := func(keys ...string) string {
-		for _, k := range keys {
-			if v, ok := m[k]; ok && v != nil {
-				if s, ok := v.(string); ok {
-					return s
-				}
-				return fmt.Sprint(v)
-			}
-		}
-		return ""
-	}
-	getInt := func(keys ...string) int {
-		for _, k := range keys {
-			if v, ok := m[k]; ok && v != nil {
-				switch x := v.(type) {
-				case float64:
-					return int(x)
-				case int:
-					return x
-				case string:
-					n, _ := strconv.Atoi(x)
-					return n
-				}
-			}
-		}
-		return 0
-	}
-	getFloat := func(keys ...string) float64 {
-		for _, k := range keys {
-			if v, ok := m[k]; ok && v != nil {
-				switch x := v.(type) {
-				case float64:
-					return x
-				case int:
-					return float64(x)
-				case string:
-					f, _ := strconv.ParseFloat(x, 64)
-					return f
-				}
-			}
-		}
-		return 0
-	}
-	getTimeStr := func(keys ...string) string {
-		for _, k := range keys {
-			if v, ok := m[k]; ok && v != nil {
-				switch x := v.(type) {
-				case string:
-					return x
-				case float64:
-					return strconv.FormatInt(int64(x), 10)
-				case int:
-					return strconv.FormatInt(int64(x), 10)
-				}
-			}
-		}
-		return ""
-	}
-	getBool := func(keys ...string) bool {
-		for _, k := range keys {
-			if v, ok := m[k]; ok && v != nil {
-				switch x := v.(type) {
-				case bool:
-					return x
-				case string:
-					return strings.EqualFold(x, "true") || x == "1"
-				case float64:
-					return x != 0
-				case int:
-					return x != 0
-				}
-			}
-		}
-		return false
-	}
-	serial = getStr("serial", "Serial", "SERIAL")
-	person = getStr("person", "PERSON", "Person")
-	manPower = getInt("manPower", "Man Power", "man_power", "MAN_POWER")
-	rawJobId = getStr("jobId", "JOB_ID", "JobId", "job_id")
-	working = getBool("working", "Working", "WORKING")
-	status = getBool("status", "Status", "STATUS")
-	subJob = getStr("subJob", "SUB_JOB", "SubJob", "sub_job")
-	stroke = getInt("stroke", "Stroke", "STOKE", "stroke")
-	volt = getFloat("volt", "Volt", "VOLT")
-	amp = getFloat("amp", "Amp", "AMP")
-	pf = getFloat("pf", "PF", "Pf")
-	wh = getFloat("wh", "Wh", "WH")
-	timeStr = getTimeStr("time", "TIME", "Time")           // only "time" keys
-	timestampStr = getTimeStr("timestamp", "Timestamp")   // only "timestamp" keys
-	return serial, person, manPower, rawJobId, subJob, working, status, stroke, volt, amp, pf, wh, timeStr, timestampStr, nil
-}
-
-// Subscribe subscribes to machine/+/realtime and calls onMessage for each message.
-func Subscribe(client mqtt.Client, onMessage func(model.MachineData) error) error {
-	token := client.Subscribe(TopicRealtime, QoS, func(c mqtt.Client, msg mqtt.Message) {
-		topic := msg.Topic()
-		log.Printf("mqtt: received topic=%s payload_len=%d", topic, len(msg.Payload()))
-		machineId, ok := TopicToMachineId(topic)
-		if !ok {
-			log.Printf("mqtt: invalid topic %q", msg.Topic())
-			return
-		}
-		serial, person, manPower, rawJobId, subJob, working, status, stroke, volt, amp, pf, wh, timeStr, timestampStr, err := parsePayload(msg.Payload())
-		if err != nil {
-			log.Printf("mqtt: invalid json topic=%s err=%v", msg.Topic(), err)
-			return
-		}
-		// Parse jobId: "JOB-AAA-001#CP0001" -> JobId="JOB-AAA-001", Company="CP0001"
-		jobId, company := rawJobId, ""
-		if i := strings.Index(rawJobId, "#"); i >= 0 {
-			jobId = strings.TrimSpace(rawJobId[:i])
-			company = strings.TrimSpace(rawJobId[i+1:])
-		}
-		now := time.Now()
-		var timeParsed, timestampParsed time.Time
-		timeParsed = now
-		timestampParsed = now
-		if timeStr != "" {
-			if parsed, err := parseTime(timeStr); err == nil && parsed != nil {
-				timeParsed = *parsed
-			} else {
-				log.Printf("mqtt: invalid time %q topic=%s using now", timeStr, msg.Topic())
-			}
-		}
-		if timestampStr != "" {
-			if parsed, err := parseTime(timestampStr); err == nil && parsed != nil {
-				timestampParsed = *parsed
-			} else {
-				log.Printf("mqtt: invalid timestamp %q topic=%s using now", timestampStr, msg.Topic())
-			}
-		}
-		data := model.MachineData{
-			MachineId: machineId,
-			Serial:    serial,
-			Person:    person,
-			ManPower:  manPower,
-			JobId:     jobId,
-			Company:   company,
-			Working:   working,
-			Status:    status,
-			SubJob:    subJob,
-			Stroke:    stroke,
-			Volt:      roundFloat(volt, 2),
-			Amp:       roundFloat(amp, 2),
-			Pf:        roundFloat(pf, 2),
-			Wh:        roundFloat(wh, 2),
-			Time:      timeParsed,
-			Timestamp: timestampParsed,
-		}
-		if err := onMessage(data); err != nil {
-			log.Printf("mqtt: influx write failed topic=%s err=%v", msg.Topic(), err)
-		}
+// Subscribe subscribes to machine/+/realtime. With QoS 1 and a persistent
+// session the broker queues messages while the worker is down or reconnecting.
+func Subscribe(client mqtt.Client, qos byte, h *Handler) error {
+	token := client.Subscribe(TopicRealtime, qos, func(_ mqtt.Client, msg mqtt.Message) {
+		h.Handle(msg.Topic(), msg.Payload())
 	})
 	token.Wait()
-	if token.Error() != nil {
-		return fmt.Errorf("subscribe %s: %w", TopicRealtime, token.Error())
+	if err := token.Error(); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicRealtime, err)
 	}
-	log.Printf("mqtt: subscribed to %s QoS=%d", TopicRealtime, QoS)
+	log.Printf("mqtt: subscribed to %s QoS=%d", TopicRealtime, qos)
 	return nil
 }
